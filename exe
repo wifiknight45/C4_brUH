@@ -3,39 +3,44 @@ import subprocess
 import json
 import os
 import argparse
+import xmltodict
 
 def run_command(command, timeout=None):
     """Executes a shell command with a timeout."""
     try:
-        result = subprocess.run(command, shell=True, timeout=timeout, capture_output=True, text=True, check=True)
-        return result.stdout
+        result = subprocess.run(
+            command, shell=True, timeout=timeout, capture_output=True, text=True, check=True
+        )
+        return result.stdout if result.stdout else result.stderr
     except subprocess.CalledProcessError as e:
-        print(f"Command '{command}' failed with {e}")
+        print(f"Command '{command}' failed: {e.stderr}")
         return None
     except subprocess.TimeoutExpired:
-        print(f"Command '{command}' timed out")
+        print(f"Command '{command}' timed out.")
         return None
 
 def scan_with_nmap(target):
     """Scans the target for the 20 most common vulnerable ports using nmap."""
-    # List of commonly exploited ports, might need adjustment based on current vulnerabilities
     ports = "21,22,23,25,53,80,110,135,139,443,445,1433,1723,3306,3389,5900,6346,8080,8443,20034"
-    
-    # Nmap command to scan specific ports with service version detection
     nmap_cmd = f"nmap -sV -Pn -p {ports} {target} -oX -"
     output = run_command(nmap_cmd)
     if output:
         try:
-            return json.loads(json.dumps(xmltodict.parse(output)['nmaprun']))
+            parsed_output = xmltodict.parse(output)
+            return json.loads(json.dumps(parsed_output.get('nmaprun', {})))
         except Exception as e:
-            print(f"Error parsing nmap output: {e}")
+            print(f"Error parsing Nmap output: {e}")
     return None
 
 def capture_traffic_with_tcpdump(target):
     """Captures network traffic to/from the target to detect any active scans or connections."""
-    # Start tcpdump to capture traffic for 30 seconds
-    tcpdump_cmd = f"sudo tcpdump -i any host {target} -w /tmp/{target}_capture.pcap -G 30 -W 1"
-    run_command(tcpdump_cmd)
+    pcap_file = os.path.join("/tmp", f"{target}_capture.pcap")
+    tcpdump_cmd = f"sudo tcpdump -i any host {target} -w {pcap_file} -G 30 -W 1"
+    output = run_command(tcpdump_cmd)
+    if output:
+        print(f"Traffic capture saved to: {pcap_file}")
+    else:
+        print("Failed to capture network traffic. Ensure you have sudo privileges.")
 
 def test_ports_with_netcat(target, ports):
     """Attempts to connect to each of the vulnerable ports to check if they are truly open."""
@@ -52,10 +57,10 @@ def main():
     parser.add_argument("target", help="The target IP or hostname to scan")
     args = parser.parse_args()
 
-    # Ensure necessary tools are installed
-    required_tools = ['nmap', 'tcpdump', 'nc', 'xmltodict']
+    # Validate required tools
+    required_tools = ['nmap', 'tcpdump', 'nc']
     for tool in required_tools:
-        if not subprocess.call(f"which {tool}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+        if not run_command(f"which {tool}"):
             print(f"Error: {tool} is not installed or not in PATH.")
             return
 
@@ -63,23 +68,33 @@ def main():
     nmap_results = scan_with_nmap(args.target)
     if nmap_results:
         print("Nmap Scan Results:")
-        for host in nmap_results.get('host', []):
-            ports = host.get('ports', {}).get('port', [])
-            for port in ports:
-                print(f"  - Port: {port['@portid']}, State: {port['state']['@state']}, Service: {port.get('service', {}).get('@name')}")
+        hosts = nmap_results.get('host', [])
+        if not isinstance(hosts, list):  # Ensure hosts is a list
+            hosts = [hosts]
 
-        # Extract ports that are open
-        open_ports = [port['@portid'] for port in ports if port['state']['@state'] == 'open']
+        open_ports = []
+        for host in hosts:
+            ports = host.get('ports', {}).get('port', [])
+            if not isinstance(ports, list):  # Ensure ports is a list
+                ports = [ports]
+            for port in ports:
+                state = port.get('state', {}).get('@state')
+                port_id = port.get('@portid')
+                service = port.get('service', {}).get('@name')
+                print(f"  - Port: {port_id}, State: {state}, Service: {service}")
+                if state == 'open':
+                    open_ports.append(port_id)
 
         # Capture traffic
         capture_traffic_with_tcpdump(args.target)
-        print("Network traffic captured for 30 seconds. File saved as /tmp/{args.target}_capture.pcap")
 
-        # Test open ports with netcat for confirmation
+        # Confirm open ports with netcat
         confirmed_open = test_ports_with_netcat(args.target, open_ports)
         print("Netcat Port Confirmation:")
         for port in confirmed_open:
             print(f"  - Port {port} is confirmed open")
+    else:
+        print("No results from Nmap scan. Check your target and try again.")
 
 if __name__ == "__main__":
     main()
