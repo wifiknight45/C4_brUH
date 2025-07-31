@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import xmltodict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+# Default ports to scan
+DEFAULT_PORTS = [
+    21, 22, 23, 25, 53, 80, 110, 135, 139, 1433,
+    1723, 3306, 3389, 5900, 6346, 8080, 8443, 20034
+]
+
+
+def configure_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+
+def check_tool_availability(tools: List[str]) -> bool:
+    missing = [t for t in tools if shutil.which(t) is None]
+    if missing:
+        logging.error("Missing required tools: %s", ", ".join(missing))
+        return False
+    return True
+
+
+def run_command(cmd: List[str],
+                timeout: Optional[int] = None) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=True
+        )
+        return proc.stdout.strip() or proc.stderr.strip()
+    except subprocess.CalledProcessError as e:
+        logging.debug("Command failed [%s]: %s", " ".join(cmd), e.stderr.strip())
+    except subprocess.TimeoutExpired:
+        logging.warning("Command timed out: %s", " ".join(cmd))
+    return None
+
+
+def scan_with_nmap(target: str,
+                   ports: List[int],
+                   use_scripts: bool) -> Optional[List[Dict[str, Any]]]:
+    port_str = ",".join(map(str, ports))
+    cmd = ["nmap", "-sV", "-Pn", "-p", port_str]
+    if use_scripts:
+        cmd.append("-sC")
+    cmd.extend([target, "-oX", "-"])
+    xml_out = run_command(cmd, timeout=120)
+    if not xml_out:
+        return None
+
+    try:
+        nm = xmltodict.parse(xml_out).get("nmaprun", {})
+    except Exception as e:
+        logging.error("Failed to parse nmap XML: %s", e)
+        return None
+
+    hosts = nm.get("host", [])
+    if not isinstance(hosts, list):
+        hosts = [hosts]
+
+    results: List[Dict[str, Any]] = []
+    for host in hosts:
+        ports_block = host.get("ports", {}).get("port", [])
+        if not isinstance(ports_block, list):
+            ports_block = [ports_block]
+        for p in ports_block:
+            portid = int(p["@portid"])
+            state = p.get("state", {}).get("@state", "unknown")
+            service = p.get("service", {}).get("@name", "n/a")
+            results.append({
+                "port": portid,
+                "state": state,
+                "service": service
+            })
+    return results
+
+
+def capture_traffic(target: str,
+                    duration: int,
+                    disable_promisc: bool,
+                    bpf_filter: Optional[str]) -> None:
+    pcap = os.path.join("/tmp", f"{target}_{int(datetime.now().timestamp())}.pcap")
+    cmd = ["sudo", "tcpdump", "-i", "any"]
+    if disable_promisc:
+        cmd.append("-p")
+    expr = bpf_filter or f"host {target}"
+    cmd.extend([expr, "-w", pcap, "-G", str(duration), "-W", "1"])
+    if run_command(cmd):
+        logging.info("Traffic captured: %s", pcap)
+    else:
+        logging.error("tcpdump failed – check permissions or filter syntax")
+
+
+def confirm_port(target: str, port: int) -> Tuple[int, bool]:
+    cmd = ["nc", "-z", "-v", "-w", "5", target, str(port)]
+    out = run_command(cmd, timeout=10) or ""
+    ok = "succeeded" in out.lower() or "open" in out.lower()
+    return port, ok
+
+
+def confirm_open_ports(target: str,
+                       ports: List[int],
+                       threads: int) -> List[int]:
+    confirmed: List[int] = []
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = {executor.submit(confirm_port, target, p): p for p in ports}
+        for fut in as_completed(futures):
+            port, ok = fut.result()
+            if ok:
+                confirmed.append(port)
+    return confirmed
+
+
+def generate_csv_report(path: str,
+                        scans: List[Dict[str, Any]],
+                        confirmed: List[int]) -> None:
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Port", "State", "Service", "Confirmed"])
+        for s in scans:
+            writer.writerow([
+                s["port"], s["state"], s["service"],
+                "yes" if s["port"] in confirmed else "no"
+            ])
+    logging.info("CSV report written to %s", path)
+
+
+def generate_html_report(path: str,
+                         scans: List[Dict[str, Any]],
+                         confirmed: List[int]) -> None:
+    rows = "\n".join(
+        f"<tr><td>{s['port']}</td><td>{s['state']}</td>"
+        f"<td>{s['service']}</td><td>{'✔' if s['port'] in confirmed else '✘'}</td></tr>"
+        for s in scans
+    )
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Scan Report</title></head>
+<body>
+<h1>Scan Report for {args.target}</h1>
+<table border="1" cellpadding="5">
+<tr><th>Port</th><th>State</th><th>Service</th><th>Confirmed</th></tr>
+{rows}
+</table>
+</body>
+</html>"""
+    with open(path, "w") as f:
+        f.write(html)
+    logging.info("HTML report written to %s", path)
+
+
+if __name__ == "__main__":
+    configure_logging()
+
+    parser = argparse.ArgumentParser(
+        description="Network Scanner with nmap, tcpdump, netcat & reporting"
+    )
+    parser.add_argument("target", help="IP or hostname to scan")
+    parser.add_argument(
+        "--ports",
+        type=lambda s: [int(p) for p in s.split(",") if p.isdigit()],
+        default=DEFAULT_PORTS,
+        help="Comma-separated list of ports to scan"
+    )
+    parser.add_argument(
+        "--scripts",
+        action="store_true",
+        help="Enable nmap service fingerprinting scripts (-sC)"
+    )
+    parser.add_argument(
+        "--duration",
+        type=int,
+        default=30,
+        help="tcpdump capture duration in seconds"
+    )
+    parser.add_argument(
+        "--no-promisc",
+        action="store_true",
+        help="Disable promiscuous mode in tcpdump"
+    )
+    parser.add_argument(
+        "--filter",
+        dest="bpf_filter",
+        help="Custom BPF filter expression for tcpdump"
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=10,
+        help="Number of threads for parallel netcat checks"
+    )
+    parser.add_argument(
+        "--report-format",
+        choices=["csv", "html"],
+        help="Generate a report in the specified format"
+    )
+    parser.add_argument(
+        "--report-file",
+        default=None,
+        help="Path to write the report (defaults to scan_report.[csv|html])"
+    )
+
+    args = parser.parse_args()
+
+    # Verify required tools
+    if not check_tool_availability(["nmap", "tcpdump", "nc"]):
+        sys.exit(1)
+
+    # Perform Nmap scan
+    logging.info("Running nmap scan on %s …", args.target)
+    scan_results = scan_with_nmap(args.target, args.ports, args.scripts)
+    if not scan_results:
+        logging.error("No nmap output – aborting.")
+        sys.exit(1)
+
+    open_ports = [s["port"] for s in scan_results if s["state"] == "open"]
+    logging.info("Discovered %d open ports: %s", len(open_ports), open_ports)
+
+    # Capture live traffic
+    capture_traffic(
+        args.target,
+        args.duration,
+        disable_promisc=args.no_promisc,
+        bpf_filter=args.bpf_filter
+    )
+
+    # Confirm open ports concurrently
+    confirmed = confirm_open_ports(args.target, open_ports, args.threads)
+    logging.info("Confirmed %d open ports: %s", len(confirmed), confirmed)
+
+    # Generate report if requested
+    if args.report_format:
+        report_path = args.report_file or f"scan_report.{args.report_format}"
+        if args.report_format == "csv":
+            generate_csv_report(report_path, scan_results, confirmed)
+        else:
+            # HTML generator needs access to args.target in closure
+            globals()["args"] = args
+            generate_html_report(report_path, scan_results, confirmed)
+
+    logging.info("Scan complete.")
