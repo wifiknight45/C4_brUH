@@ -1,140 +1,118 @@
-# C4_brUH
+## C4_brUH
+a lightweight, extensible network scanning tool that leverages nmap, tcpdump, and netcat to discover + verify open ports, capture live traffic + generate CSV or HTML reports. It supports service fingerprinting + parallel port confirmation + custom BPF filters + promiscuous mode toggling + Docker-based deployment.
 
-A Python-based network reconnaissance tool that integrates nmap, tcpdump, and netcat to perform port scanning, traffic capture, and port verification against a given target IP or hostname. Developed by @wifiknight45.
+-------->features
+a) scan with nmap using service version detection and optional scripts (-sC)
+b) capture live packets for a specified duration with tcpdump, toggling promiscuous mode or using a custom BPF filter
+c) confirm open ports in parallel using concurrent.futures and netcat
+d) generate CSV or HTML reports summarizing scan results and confirmations
+g) containerize the tool with Docker for consistent environments
 
----
+Prerequisites
+I. python 3.7 or higher
+II. nmap
+III. tcpdump
+IV. netcat (nc)
+V. sudo privileges for tcpdump captures
+VI. pipenv or virtualenv (optional, but recommended)
 
-Table of Contents
+installation
+1) clone the repository
 
-1. Features
-2. Requirements
-3. Installation
-4. Usage
-5. Example Output
-6. How It Works
-7. Contributing
-8. License
-9. Author
+bash
+2) git clone https://github.com/wifiknight45/C4_brUH.git
+3) cd network-scanner
+4) create and activate a virtual environment (optional)
 
+bash
+python3 -m venv venv
+4a) source venv/bin/activate
 
----
-
-Features
-
-• Scans for the 20 most commonly vulnerable ports using Nmap
-• Parses XML output from Nmap into JSON for easy analysis
-• Captures live network traffic with tcpdump for 30 seconds
-• Verifies truly open ports with Netcat
-• Graceful error handling and timeout support
-
-
----
-
-Requirements
-
-• Python 3.6 or higher
-• Nmap installed and in your `PATH`
-• tcpdump installed and in your `PATH` (requires sudo privileges for packet capture)
-• Netcat (`nc`) installed and in your `PATH`
-• Python packages:• `xmltodict`
+5) install dependencies
+bash
+pip install -r requirements.txt
 
 
+---------->usage
 
-## You can install `xmltodict` via pip:
+bash
 
-pip install xmltodict
+./scanner.py <target> [options]
+Arguments and options:
 
-OR
-## for Jupyter Notebooks or goog colab:
+<target> IP address or hostname to scan
 
-!pip install xmltodict
+--ports comma-separated list of ports to scan (default: 21,22,23,25,53,80,110,135,139,1433,1723,3306,3389,5900,6346,8080,8443,20034)
 
----
+--scripts enable nmap service fingerprinting scripts (-sC)
 
-Installation
+--duration tcpdump capture duration in seconds (default: 30)
 
-1. Clone the repository:git clone https://github.com/wifiknight45/C4_brUH.git
-2. Change into the project directory:cd C4_brUH
-3. (Optional) Create and activate a virtual environment:python3 -m venv venv
-source venv/bin/activate
-4. Install the required Python dependencies:pip install -r requirements.txt
+--no-promisc disable promiscuous mode in tcpdump
 
+--filter <expression> custom BPF filter for tcpdump
 
----
+--threads <n> maximum threads for parallel netcat checks (default: 10)
 
-Usage
+--report-format <csv|html> generate a report in CSV or HTML format
 
-Make sure you have the required tools installed and accessible, then run:
+--report-file <path> output path for the report (defaults to scan_report.csv or scan_report.html)
 
-./C4_brUH.py <target>
+---->examples
+scan with default settings and generate CSV report
 
-Replace `<target>` with an IP address or hostname. For example:
+bash
+./scanner.py 192.168.1.10 --report-format csv
+run a deep fingerprint scan, capture for 60 seconds, and use a BPF filter
 
-./C4_brUH.py 192.168.1.100
+bash
+./scanner.py example.com \
+  --scripts \
+  --duration 60 \
+  --filter "tcp port 80 or port 443" \
+  --report-format html \
+  --report-file web_scan.html
+disable promiscuous mode and increase parallel checks
 
-Command-Line Options
+bash
+./scanner.py 10.0.0.5 \
+  --no-promisc \
+  --threads 20 \
+  --report-format csv
 
-• `target`
-The IP address or hostname to scan.
+----->Docker
+1) build the Docker image
 
+bash
+2) docker build -t network-scanner .
+3) run inside a container (grant capabilities for packet capture)
 
-No additional flags are required—everything is automated once you provide the target.
+bash
+docker run --rm \
+  --net host \
+  --cap-add NET_RAW \
+  --cap-add NET_ADMIN \
+  C4_brUH \
+  192.168.1.0/24 \
+  --report-format html
 
----
-
-Example Output
-
-$ ./C4_brUH.py example.com
-
-Nmap Scan Results:
-  - Port: 21, State: closed, Service: ftp
-  - Port: 22, State: open, Service: ssh
-  - Port: 80, State: open, Service: http
-  - …
-
-Traffic capture saved to: /tmp/example.com_capture.pcap
-
-Netcat Port Confirmation:
-  - Port 22 is confirmed open
-  - Port 80 is confirmed open
-
----
-
-How It Works
-
-1. Tool Check
-Verifies that `nmap`, `tcpdump`, and `nc` are installed by running `which` on each.
-2. Nmap Scan
-Executes:nmap -sV -Pn -p 21,22,23,25,…,8443,20034 <target> -oX -Parses the XML output with `xmltodict` into JSON.
-3. Traffic Capture
-Runs:sudo tcpdump -i any host <target> -w /tmp/<target>_capture.pcap -G 30 -W 1Captures 30 seconds of packets to/from the target.
-4. Port Verification
-Iterates over discovered open ports and runs:nc -z -v -w5 <target> <port>Logs only the ports that successfully connect.
-
-
----
+----------->project structure
+scanner.py main script containing scan, capture, confirmation, and reporting logic
+requirements.txt Python dependencies (xmltodict)
+Dockerfile instructions to build a container image
 
 Contributing
-
-Contributions, issues, and feature requests are welcome! Feel free to fork the repository and submit a pull request.
-
-1. Fork this repository
-2. Create your feature branch (`git checkout -b feature/my-feature`)
-3. Commit your changes (`git commit -m 'Add some feature'`)
-4. Push to the branch (`git push origin feature/my-feature`)
-5. Open a Pull Request
-
-
----
+a) fork the repository
+b) create a feature branch
+c) implement your changes and add tests
+d) submit a pull request
 
 License
-
 This project is licensed under the MIT License. See the LICENSE file for details.
 
 ---
 
-Author
-
-Created by @wifiknight45
+Developer 
+@wifiknight45
 wifiknight45@proton.me
-Feel free to reach out with questions or feedback!
+feel free to reach out with questions or feedback 
